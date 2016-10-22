@@ -1,0 +1,440 @@
+/* $Header: XXZN_DISTRIBUTION_PLAN_PKG_1.2.SQL 1.2 16/10/18 17:30:00 AHMED.LOTFY noship $ */
+
+CREATE OR REPLACE PACKAGE APPS.XXZN_DISTRIBUTION_PLAN_PKG 
+AS
+--+================================================================================================+--
+--| Packag Name     :XXZN_DISTRIBUTION_PLAN_PKG                                                    |--
+--| Purpose         :Package to convert Distribution Plan Form Entries into Move Orders            |--
+--| Author          :Ahmed Lotfy                                                                   |--
+--| Date            :12 February, 2015                                                             |--
+--| This Package Contains Following Sub Programs:                                                  |--
+--| ============================================                                                   |--
+--|                                                                                                |--
+--| Type            Name                      Description                                          |--
+--| =========       =================         ===================                                  |--
+--| PROCEDURE        create_move_order        Create Move Orders from Distribution Plan Lines      |--
+--|                                           of the same Source and Destination Subinventories    |--
+--| PROCEDURE        DIST_TXN_REQ_UPDATE      Insert and Update Processing History into            |--
+--|                                           Distribution Plan Related Tables                     |--
+--|Change Record:                                                                                  |--
+--|=============                                                                                   |--
+--|Version      Date            Author              Remarks                                        |--
+--|=======      =========       =============       ==================                             |--
+--| Draft       12 FEB 2015   AHMED LOTFY           Initial draft version                          |--
+--| 1.0         12 OCT 2016   AHMED LOTFY           DB Tested Package                              |--
+--| 1.1         13 OCT 2016   AHMED LOTFY           Improved Version                               |--
+--| 1.2         18 OCT 2016   AHMED LOTFY           Final Tested Version, assigned to              |--
+--|                                                 XXZNDPP consurrent program                     |--
+--+================================================================================================+--
+
+PROCEDURE create_move_order(
+    p_chr_errbuf    OUT NOCOPY      VARCHAR2
+,   p_chr_retcode   OUT NOCOPY      VARCHAR2
+,   p_dist_plan_id                  IN NUMBER
+,   p_dist_line_id                  IN NUMBER
+);
+PROCEDURE DIST_TXN_REQ_UPDATE(
+    p_dist_line_id                  IN NUMBER
+,   p_mo_header_id                  IN NUMBER
+,   p_mo_line_id                    IN NUMBER
+,   p_request_id                    IN NUMBER
+,   p_user_id                       IN NUMBER
+);
+END XXZN_DISTRIBUTION_PLAN_PKG;
+/
+
+CREATE OR REPLACE PACKAGE BODY APPS.XXZN_DISTRIBUTION_PLAN_PKG
+AS
+--+================================================================================================+--
+--| Packag Name     :XXZN_DISTRIBUTION_PLAN_PKG                                                    |--
+--| Purpose         :Package to convert Distribution Plan Form Entries into Move Orders            |--
+--| Author          :Ahmed Lotfy                                                                   |--
+--| Date            :12 February, 2015                                                             |--
+--| This Package Contains Following Sub Programs:                                                  |--
+--| ============================================                                                   |--
+--|                                                                                                |--
+--| Type            Name                      Description                                          |--
+--| =========       =================         ===================                                  |--
+--| PROCEDURE        create_move_order        Create Move Orders from Distribution Plan Lines      |--
+--|                                           of the same Source and Destination Subinventories    |--
+--| PROCEDURE        DIST_TXN_REQ_UPDATE      Insert and Update Processing History into            |--
+--|                                           Distribution Plan Related Tables                     |--
+--|Change Record:                                                                                  |--
+--|=============                                                                                   |--
+--|Version      Date            Author              Remarks                                        |--
+--|=======      =========       =============       ==================                             |--
+--| Draft       12 FEB 2015   AHMED LOTFY           Initial draft version                          |--
+--| 1.0         12 OCT 2016   AHMED LOTFY           DB Tested Package                              |--
+--| 1.1         13 OCT 2016   AHMED LOTFY           Improved Version                               |--
+--| 1.2         18 OCT 2016   AHMED LOTFY           Final Tested Version, assigned to              |--
+--|                                                 XXZNDPP consurrent program                     |--
+--+================================================================================================+--
+PROCEDURE create_move_order(
+    p_chr_errbuf    OUT NOCOPY      VARCHAR2
+,   p_chr_retcode   OUT NOCOPY      VARCHAR2
+,   p_dist_plan_id                  IN NUMBER
+,   p_dist_line_id                  IN NUMBER
+)
+   IS
+      l_hdr_rec         inv_move_order_pub.trohdr_rec_type
+                           := inv_move_order_pub.g_miss_trohdr_rec;
+      l_line_tbl        inv_move_order_pub.trolin_tbl_type
+                           := inv_move_order_pub.g_miss_trolin_tbl;
+            x_return_status   VARCHAR2(1);
+            x_msg_count       NUMBER;
+            x_msg_data        VARCHAR2(4000);
+      x_hdr_rec         inv_move_order_pub.trohdr_rec_type
+                           := inv_move_order_pub.g_miss_trohdr_rec;
+      x_hdr_val_rec     inv_move_order_pub.trohdr_val_rec_type;
+      x_line_tbl        inv_move_order_pub.trolin_tbl_type;
+      x_line_val_tbl    inv_move_order_pub.trolin_val_tbl_type;
+      v_msg_index_out   NUMBER;
+      l_rsr_type        inv_reservation_global.mtl_reservation_tbl_type;
+      v_mater_org_id    NUMBER;
+      v_inv_org_id      NUMBER;
+      v_SRC_LOC_ID      NUMBER;
+      V_DEST_LOC_ID     NUMBER;
+      V_MO_HEADER_ID    NUMBER;
+      V_MO_LINE_ID      NUMBER;
+      V_REQUEST_ID      NUMBER;
+      v_line_no         NUMBER;
+
+      CURSOR CUR_INV_DIST_PLANS
+      IS
+SELECT DPH.ORGANIZATION_ID,
+       DPH.DIST_PLAN_NO,
+       DPH.DIST_PLAN_TYPE,
+       DPH.STATUS,
+       DPH.REMARKS H_REMARKS,
+       DPH.PLAN_DATE,
+       DPL.SUBINVENTORY_CODE H_SUBINVENTORY_CODE,
+       DPL.TRANSFER_SUBINVENTORY H_TRANSFER_SUBINVENTORY
+  FROM XX_INV_DIST_PLANS DPH, XX_INV_DIST_LINES DPL
+ WHERE     0 = 0
+ AND DPH.DIST_PLAN_ID = DPL.DIST_PLAN_ID
+       AND (
+       (NOT EXISTS
+                  (SELECT 1
+                     FROM XX_INV_DIST_LINES XDPL,
+                          XX_INV_DIST_LINE_STATUSES_V DPLS
+                    WHERE     LINE_STATUS <> 'Canceled'
+                          AND DPL.DIST_LINE_ID = XDPL.DIST_LINE_ID
+                          AND DPL.DIST_LINE_ID = DPLS.DIST_LINE_ID)
+       AND dph.STATUS in ('Incomplete','Partially Processed')
+       )
+OR
+       EXISTS
+                  (SELECT 1
+                     FROM XX_INV_DIST_LINES XDPL,
+                          XX_INV_DIST_LINE_STATUSES_V DPLS
+                    WHERE     LINE_STATUS = 'Canceled'
+                          AND nvl(DPL.HOLD_FLAG,'N') <> 'Y'  
+                          AND DPL.DIST_LINE_ID = XDPL.DIST_LINE_ID
+                          AND DPL.DIST_LINE_ID = DPLS.DIST_LINE_ID)
+       AND dph.STATUS in ('Processed','Partially Processed')
+       )
+       AND DPH.DIST_PLAN_ID = p_dist_plan_id
+       AND DPL.DIST_LINE_ID = NVL ( p_dist_line_id, DPL.DIST_LINE_ID)
+       group by DPL.SUBINVENTORY_CODE,DPL.TRANSFER_SUBINVENTORY,
+       DPH.ORGANIZATION_ID,
+       DPH.DIST_PLAN_NO,
+       DPH.DIST_PLAN_TYPE,
+       DPH.STATUS,
+       DPH.REMARKS,
+       DPH.PLAN_DATE;
+                
+      CURSOR CUR_INV_DIST_PLAN_LINES(SRC VARCHAR2,DEST VARCHAR2)
+      IS
+         SELECT DPL.ORGANIZATION_ID,
+                DPH.DIST_PLAN_NO,
+                DPH.DIST_PLAN_TYPE,
+                DPH.STATUS,
+                DPH.REMARKS H_REMARKS,
+                DPH.PLAN_DATE,
+                DPH.SUBINVENTORY_CODE H_SUBINVENTORY_CODE,
+                DPH.TRANSFER_SUBINVENTORY H_TRANSFER_SUBINVENTORY,
+                DPL.DIST_LINE_ID,
+                DPL.LINE_NO,
+                DPL.INVENTORY_ITEM_ID,
+                DPL.QUANTITY,
+                DPL.UOM_CODE,
+                DPL.VENDOR_ID,
+                DPL.SUBINVENTORY_CODE,
+                DPL.TRANSFER_SUBINVENTORY,
+                DPL.HOLD_FLAG,
+                DPL.REMARKS L_REMARKS,
+                DPL.CREATED_BY,
+                DPL.LAST_UPDATED_BY,
+                DPL.LAST_UPDATE_DATE
+           FROM XX_INV_DIST_PLANS DPH, XX_INV_DIST_LINES DPL
+          WHERE     0 = 0
+                AND DPH.DIST_PLAN_ID = DPL.DIST_PLAN_ID
+                AND NOT EXISTS
+                           (SELECT 1
+                              FROM XX_INV_DIST_LINE_STATUSES_V DPLS
+                             WHERE     DPLS.LINE_STATUS <> 'Canceled'
+                                   AND DPL.DIST_LINE_ID = DPLS.DIST_LINE_ID)
+                                          AND (
+       (NOT EXISTS
+                  (SELECT 1
+                     FROM XX_INV_DIST_LINES XDPL,
+                          XX_INV_DIST_LINE_STATUSES_V DPLS
+                    WHERE     DPLS.LINE_STATUS <> 'Canceled'
+                          AND DPL.DIST_LINE_ID = XDPL.DIST_LINE_ID
+                          AND DPL.DIST_LINE_ID = DPLS.DIST_LINE_ID)
+       AND dph.STATUS in ('Incomplete','Partially Processed')
+       )
+OR
+       EXISTS
+                  (SELECT 1
+                     FROM XX_INV_DIST_LINES XDPL,
+                          XX_INV_DIST_LINE_STATUSES_V DPLS
+                    WHERE     DPLS.LINE_STATUS = 'Canceled'
+                          AND DPL.DIST_LINE_ID = XDPL.DIST_LINE_ID
+                          AND DPL.DIST_LINE_ID = DPLS.DIST_LINE_ID)
+       AND dph.STATUS in ('Processed')
+       )
+                AND NVL (DPL.HOLD_FLAG, 'N') <> 'Y'
+                AND DPL.DIST_PLAN_ID = p_dist_plan_id
+                AND DPL.DIST_LINE_ID = nvl(p_dist_line_id,DPL.DIST_LINE_ID)
+                AND DPL.SUBINVENTORY_CODE=SRC
+                AND DPL.TRANSFER_SUBINVENTORY=DEST;  
+
+   BEGIN
+
+      FOR i IN CUR_INV_DIST_PLANS
+      LOOP
+      
+      l_line_tbl.DELETE;
+      x_line_tbl.DELETE;
+      
+         SELECT MASTER_ORGANIZATION_ID
+           INTO v_mater_org_id
+           FROM apps.INVBV_INVENTORY_ORGANIZATIONS
+          WHERE ORGANIZATION_ID = i.organization_id;
+                
+      l_hdr_rec.date_required := i.plan_date;
+      l_hdr_rec.header_status := 1;
+      l_hdr_rec.organization_id := i.organization_id;
+      l_hdr_rec.status_date := SYSDATE;
+      l_hdr_rec.transaction_type_id := 105; -- Trade Item - Transfer
+      l_hdr_rec.move_order_type := inv_globals.g_move_order_requisition;
+      l_hdr_rec.db_flag := fnd_api.g_true;
+      l_hdr_rec.operation := inv_globals.g_opr_create;
+      l_hdr_rec.description := 'Distribution Plan '||i.DIST_PLAN_NO||'|'||i.DIST_PLAN_TYPE||'|'||i.H_REMARKS;
+      l_hdr_rec.from_subinventory_code := i.H_SUBINVENTORY_CODE; --From_Subinventory
+      l_hdr_rec.to_subinventory_code := i.H_TRANSFER_SUBINVENTORY; --To_Subinventory
+      v_line_no := 0;
+      
+      for x in CUR_INV_DIST_PLAN_LINES(i.H_SUBINVENTORY_CODE,i.H_TRANSFER_SUBINVENTORY) LOOP
+      
+      v_line_no := v_line_no+1;
+      
+      select loc.INVENTORY_LOCATOR_ID
+INTO v_SRC_LOC_ID 
+from
+apps.mtl_secondary_inventories subinv
+,apps.INVBV_INVENTORY_LOCATORS LOC
+where 1=1
+and subinv.organization_id=x.ORGANIZATION_ID
+and subinv.disable_date is null
+and loc.inactive_date is null
+and subinv.organization_id=loc.organization_id
+and subinv.secondary_inventory_name=loc.subinventory_name
+and subinv.secondary_inventory_name = x.SUBINVENTORY_CODE;
+
+select loc.INVENTORY_LOCATOR_ID
+INTO v_DEST_LOC_ID 
+from
+apps.mtl_secondary_inventories subinv
+,apps.INVBV_INVENTORY_LOCATORS LOC
+where 1=1
+and subinv.organization_id=x.ORGANIZATION_ID
+and subinv.disable_date is null
+and loc.inactive_date is null
+and subinv.organization_id=loc.organization_id
+and subinv.secondary_inventory_name=loc.subinventory_name
+and subinv.secondary_inventory_name = x.TRANSFER_SUBINVENTORY;
+
+      l_line_tbl (v_line_no).date_required := x.plan_date;
+      l_line_tbl (v_line_no).inventory_item_id := x.INVENTORY_ITEM_ID;
+      l_line_tbl (v_line_no).line_id := fnd_api.g_miss_num;
+      l_line_tbl (v_line_no).line_number := v_line_no;
+      l_line_tbl (v_line_no).line_status := 1;--inv_globals.g_to_status_approved
+      l_line_tbl (v_line_no).transaction_type_id := 105; -- Trade Item - Transfer
+      l_line_tbl (v_line_no).organization_id := x.ORGANIZATION_ID;
+      l_line_tbl (v_line_no).quantity := x.QUANTITY;
+      l_line_tbl (v_line_no).status_date := SYSDATE;
+      l_line_tbl (v_line_no).uom_code := x.UOM_CODE;
+      l_line_tbl (v_line_no).db_flag := fnd_api.g_true;
+      l_line_tbl (v_line_no).operation := inv_globals.g_opr_create;
+      l_line_tbl (v_line_no).from_subinventory_code := x.SUBINVENTORY_CODE;
+      l_line_tbl (v_line_no).from_locator_id := v_SRC_LOC_ID ;
+      l_line_tbl (v_line_no).to_subinventory_code := x.TRANSFER_SUBINVENTORY;
+      l_line_tbl (v_line_no).to_locator_id := v_DEST_LOC_ID ;
+      l_line_tbl (v_line_no).attribute1 := x.DIST_LINE_ID;
+      
+
+
+      END LOOP;
+
+      inv_move_order_pub.process_move_order (
+            p_api_version_number   => 1.0,
+            p_init_msg_list        => fnd_api.g_false,
+            p_return_values        => fnd_api.g_false,
+            p_commit               => fnd_api.g_false,
+            x_return_status        => x_return_status,
+            x_msg_count            => x_msg_count,
+            x_msg_data             => x_msg_data,
+            p_trohdr_rec           => l_hdr_rec,
+            p_trolin_tbl           => l_line_tbl,
+            x_trohdr_rec           => x_hdr_rec,
+            x_trohdr_val_rec       => x_hdr_val_rec,
+            x_trolin_tbl           => x_line_tbl,
+            x_trolin_val_tbl       => x_line_val_tbl);
+         INVTROAP.Start_TO_Approval (x_hdr_rec.request_number,
+                                     'INVTROAP',
+                                     x_hdr_rec.request_number||'-'||'1');
+        fnd_file.put_line(fnd_file.LOG,'Return Status is :' || x_return_status);
+        fnd_file.put_line(fnd_file.LOG,'Message Count is :' || x_msg_count);
+        fnd_file.put_line(fnd_file.LOG,'Move Order Number is :' || x_hdr_rec.request_number);
+        fnd_file.put_line(fnd_file.LOG,'Number of Lines Created are :' || x_line_tbl.COUNT);
+            
+            for n in 1 .. x_line_tbl.COUNT loop
+            
+      V_MO_HEADER_ID := x_hdr_rec.header_id;
+      V_MO_LINE_ID := x_line_tbl (n).line_id;
+      V_REQUEST_ID := fnd_global.conc_request_id;
+      
+      XXZN_DISTRIBUTION_PLAN_PKG.DIST_TXN_REQ_UPDATE (x_line_tbl (n).attribute1,x_hdr_rec.header_id,x_line_tbl (n).line_id,V_REQUEST_ID,fnd_global.user_id);      
+
+     fnd_file.put_line(fnd_file.LOG,'MO_ID  LINE_ID  REQUEST_ID');
+     fnd_file.put_line(fnd_file.LOG,'------ -------- ----------');
+     fnd_file.put_line(fnd_file.LOG,V_MO_HEADER_ID||' '||V_MO_LINE_ID||' '||V_REQUEST_ID);
+      
+      END LOOP;
+      
+
+      
+
+         IF x_return_status = 'S' --S for SUCCESS, E for ERROR, U for Unexpected Error
+         THEN
+            COMMIT;
+         ELSE
+            ROLLBACK;
+         END IF;
+         
+
+
+
+      END LOOP;
+
+declare
+v_plan_line_count Number;
+v_line_created_orders NUMBER;
+BEGIN
+
+select count(1)
+into v_plan_line_count
+from XX_INV_DIST_LINES DPL
+where 0=0  
+AND DPL.DIST_PLAN_ID = p_dist_plan_id;     
+ 
+select count(1)
+into v_line_created_orders
+from XX_INV_DIST_LINE_STATUSES_V
+where 0=0
+and line_status in ('Created','Allocated','Transacted')
+and dist_line_id in (
+select dist_line_id from xx_inv_dist_lines where dist_plan_id = p_dist_plan_id
+);
+
+if 
+v_plan_line_count = v_line_created_orders THEN
+UPDATE XX_INV_DIST_PLANS
+SET STATUS = 'Processed'
+where DIST_PLAN_ID = p_dist_plan_id;
+commit;
+elsif
+v_plan_line_count > v_line_created_orders THEN
+UPDATE XX_INV_DIST_PLANS
+SET STATUS = 'Partially Processed'
+where DIST_PLAN_ID = p_dist_plan_id;
+commit;
+end if;
+end;
+
+   END create_move_order;
+
+   PROCEDURE DIST_TXN_REQ_UPDATE (p_dist_line_id   IN NUMBER,
+                                  p_mo_header_id   IN NUMBER,
+                                  p_mo_line_id     IN NUMBER,
+                                  p_request_id     IN NUMBER,
+                                  p_user_id        IN NUMBER
+                                  )
+IS
+   v_max_rev_num   NUMBER;
+BEGIN
+v_max_rev_num := 0;
+   BEGIN
+      SELECT MAX (REV_NUM)
+        INTO v_max_rev_num
+        FROM XX_INV_DIST_TXN_REQUESTS
+       WHERE 0 = 0 AND DIST_LINE_ID = p_dist_line_id;
+   EXCEPTION
+      WHEN NO_DATA_FOUND
+      THEN
+         v_max_rev_num := 0;
+   END;
+
+   IF v_max_rev_num <> 0
+   THEN
+      UPDATE XX_INV_DIST_TXN_REQUESTS
+         SET CURRENT_FLAG = 'N',
+             LAST_UPDATED_BY = p_user_id,
+             LAST_UPDATE_DATE = SYSDATE,
+             LAST_UPDATE_LOGIN = fnd_global.login_id
+       WHERE     0 = 0
+             AND DIST_LINE_ID = p_dist_line_id
+             AND REV_NUM = v_max_rev_num;
+
+      INSERT INTO XX_INV_DIST_TXN_REQUESTS
+           VALUES (XX_INV_DIST_TXN_REQUESTS_S.NEXTVAL,         --DIST_TXN_REQUEST_ID
+                   p_dist_line_id,                             --DIST_LINE_ID
+                   p_mo_header_id,                             --HEADER_ID
+                   p_mo_line_id,                               --LINE_ID
+                   p_request_id,                               --REQUEST_ID
+                   'Y',                                        --CURRENT_FLAG
+                   v_max_rev_num + 1,                          --REV_NUM
+                   p_user_id,                                  --CREATED_BY
+                   SYSDATE,                                    --CREATION_DATE
+                   p_user_id,                                  --LAST_UPDATED_BY
+                   SYSDATE,                                    --LAST_UPDATE_DATE
+                   fnd_global.login_id                         --LAST_UPDATE_LOGIN
+                                                 );
+                                                 
+commit;
+
+   ELSE
+      INSERT INTO XX_INV_DIST_TXN_REQUESTS
+           VALUES (XX_INV_DIST_TXN_REQUESTS_S.NEXTVAL,          --DIST_TXN_REQUEST_ID
+                   p_dist_line_id,                              --DIST_LINE_ID
+                   p_mo_header_id,                              --HEADER_ID
+                   p_mo_line_id,                                --LINE_ID
+                   p_request_id,                                --REQUEST_ID
+                   'Y',                                         --CURRENT_FLAG
+                   1,                                           --REV_NUM
+                   p_user_id,                                   --CREATED_BY
+                   SYSDATE,                                     --CREATION_DATE
+                   p_user_id,                                   --LAST_UPDATED_BY
+                   SYSDATE,                                     --LAST_UPDATE_DATE
+                   fnd_global.login_id                          --LAST_UPDATE_LOGIN
+                                                 );
+
+commit;
+
+   END IF;
+ 
+END DIST_TXN_REQ_UPDATE;
+END XXZN_DISTRIBUTION_PLAN_PKG;
+/
